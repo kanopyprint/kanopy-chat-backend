@@ -52,6 +52,8 @@ app.post("/chat", async (req, res) => {
 });
 
 /* ================= START SERVER ================= */
-app.listen(port, () => {
-  console.log(`Servidor activo en en el puerto ${PORT}`);
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log(`Servidor activo en el puerto ${PORT}`);
 });
