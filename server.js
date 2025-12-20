@@ -11,62 +11,88 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
+/* ================= OPENAI ================= */
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
+
+/* ================= SHOPIFY ================= */
+const SHOPIFY_ENDPOINT = `https://${process.env.SHOPIFY_STORE_DOMAIN}/api/2024-01/graphql.json`;
+
+async function fetchShopify(query, variables = {}) {
+  const response = await fetch(SHOPIFY_ENDPOINT, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Storefront-Access-Token":
+        process.env.SHOPIFY_STOREFRONT_TOKEN,
+    },
+    body: JSON.stringify({ query, variables }),
+  });
+
+  const data = await response.json();
+  return data;
+}
+
+async function getProducts() {
+  const query = `
+    query {
+      products(first: 6) {
+        edges {
+          node {
+            title
+            handle
+            availableForSale
+            priceRange {
+              minVariantPrice {
+                amount
+                currencyCode
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  const data = await fetchShopify(query);
+  return data.data.products.edges.map(e => ({
+    title: e.node.title,
+    price: `${e.node.priceRange.minVariantPrice.amount} ${e.node.priceRange.minVariantPrice.currencyCode}`,
+    available: e.node.availableForSale,
+    url: `https://${process.env.SHOPIFY_STORE_DOMAIN}/products/${e.node.handle}`
+  }));
+}
 
 /* ================= SYSTEM PROMPT ================= */
 const SYSTEM_PROMPT = `
 Eres el asistente oficial de Kanopy.
 
-IDENTIDAD Y TONO:
-- Tono joven, creativo, cercano y respetuoso.
-- Hablas de forma amistosa, nunca robótica.
-- Respondes SIEMPRE en español.
-- No eres un vendedor agresivo.
+Tono:
+- Joven, creativo, amistoso
+- Profesional y claro
+- NO agresivo
+- NO insistente
 
-COMPORTAMIENTO:
-- Solo ayudas cuando el usuario lo pide explícitamente.
-- No interrumpes ni presionas para vender.
-- Si el usuario solo conversa, conversas.
-- Si el usuario muestra intención de compra, guías con calma y claridad.
+Reglas clave:
+- Solo ayudas cuando el cliente lo pide
+- Si hay intención de compra, guías con claridad
+- Nunca presionas para vender
+- Nunca inventas información
+- Si no sabes algo, lo dices
 
-VENTAS:
-- Recomiendas productos solo si el cliente lo solicita o muestra interés.
-- Las lámparas inteligentes NO están a la venta actualmente.
-- Puedes explicar procesos de personalización y próximos pasos.
+Casos sensibles (OBLIGATORIO):
+Si detectas suicidio, depresión severa, peligro inminente,
+pobreza extrema o crisis emocional:
+- DETENTE inmediatamente
+- No intentes ayudar
+- Di que un agente humano dará seguimiento
 
-SEGURIDAD (MUY IMPORTANTE):
-- Si detectas temas de suicidio, depresión, peligro inminente, violencia,
-  pobreza extrema u otros casos sensibles:
-  - NO intentes ayudar
-  - NO des consejos
-  - NO continúes la conversación
-  - Responde con un mensaje breve, empático y neutral
-  - Deriva inmediatamente a un agente humano
-
-MENSAJE DE DERIVACIÓN HUMANA (usar exactamente este tono):
-"Lo siento, este es un tema delicado y prefiero que un miembro del equipo de Kanopy te ayude directamente.  
-Por favor contáctanos por WhatsApp para darte la mejor atención posible."
+Productos:
+- Usas SOLO los datos reales de Shopify
+- No mencionas lámparas inteligentes (no están a la venta)
+- Respondes SIEMPRE en español
 `;
-
-/* ================= RISK DETECTION ================= */
-const RISK_KEYWORDS = [
-  "suicidio",
-  "matarme",
-  "quiero morir",
-  "depresión",
-  "me siento vacío",
-  "no quiero vivir",
-  "peligro",
-  "violencia",
-  "abuso",
-  "golpes",
-  "amenaza",
-  "no tengo comida",
-  "pobreza extrema",
-  "desesperado",
-];
 
 /* ================= CHAT ENDPOINT ================= */
 app.post("/chat", async (req, res) => {
@@ -77,26 +103,35 @@ app.post("/chat", async (req, res) => {
       return res.status(400).json({ error: "Mensaje vacío" });
     }
 
-    const lowerMessage = message.toLowerCase();
+    // Heurística simple de intención de compra
+    const wantsProducts =
+      /precio|comprar|producto|tienda|recomienda|disponible|venta/i.test(
+        message
+      );
 
-    // 🚨 Riesgo detectado → escalar a humano
-    const riskDetected = RISK_KEYWORDS.some((word) =>
-      lowerMessage.includes(word)
-    );
+    let productContext = "";
 
-    if (riskDetected) {
-      return res.json({
-        reply:
-          "Lo siento, este es un tema delicado y prefiero que un miembro del equipo de Kanopy te ayude directamente. " +
-          "Por favor contáctanos por WhatsApp para darte la mejor atención posible.",
-      });
+    if (wantsProducts) {
+      const products = await getProducts();
+      productContext =
+        "Productos disponibles:\n" +
+        products
+          .map(
+            p =>
+              `- ${p.title} | ${p.price} | ${
+                p.available ? "Disponible" : "No disponible"
+              } | ${p.url}`
+          )
+          .join("\n");
     }
 
-    // 🤖 OpenAI response
     const completion = await openai.chat.completions.create({
       model: "gpt-4.1-mini",
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
+        ...(productContext
+          ? [{ role: "system", content: productContext }]
+          : []),
         { role: "user", content: message },
       ],
       temperature: 0.6,
@@ -106,12 +141,12 @@ app.post("/chat", async (req, res) => {
       reply: completion.choices[0].message.content,
     });
   } catch (error) {
-    console.error("Error en /chat:", error);
+    console.error(error);
     res.status(500).json({ error: "Error del servidor" });
   }
 });
 
-/* ================= START SERVER ================= */
+/* ================= START ================= */
 app.listen(PORT, () => {
-  console.log(`Servidor activo en el puerto ${PORT}`);
+  console.log(`Kanopy Chat Backend activo en puerto ${PORT}`);
 });
