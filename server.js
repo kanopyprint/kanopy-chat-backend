@@ -11,42 +11,36 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
+/* ================= OPENAI ================= */
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-/* ================= MEMORY STORE (SESSION BASED) ================= */
-// Estructura:
-// {
-//   sessionId: [
-//     { role: "system", content: "..." },
-//     { role: "user", content: "..." },
-//     { role: "assistant", content: "..." }
-//   ]
-// }
+/* ================= SESSION MEMORY ================= */
 const sessions = {};
 
 /* ================= SYSTEM PROMPT ================= */
 const SYSTEM_PROMPT = `
 Eres el asistente oficial de Kanopy.
 
-Personalidad y reglas:
-- Estilo joven, creativo y amistoso.
-- NO eres un vendedor agresivo.
-- Solo recomiendas productos si el cliente lo pide o muestra interés.
-- Guías correctamente cuando hay intención real de compra.
-- Puedes generar y compartir enlaces cuando sea relevante.
-- Respondes siempre en español.
-- Las lámparas inteligentes NO están a la venta actualmente.
+Estilo:
+- Joven, creativo y amistoso
+- Profesional y claro
+- NO vendedor agresivo
+- Solo ayudas cuando el cliente lo pide
+
+Reglas:
+- Guía compras solo si hay intención clara
+- Puedes compartir enlaces cuando sea útil
+- Respondes siempre en español
+- Las lámparas inteligentes NO están a la venta
 
 Seguridad:
-- Si detectas temas de suicidio, depresión grave, peligro inminente,
-  pobreza extrema u otros casos sensibles:
-  * Detén la conversación normal.
-  * Indica que un agente humano debe continuar.
-  * No intentes resolver la situación.
-
-Mantén respuestas claras, útiles y naturales.
+Si detectas suicidio, depresión severa, peligro inminente,
+pobreza extrema o crisis emocional:
+- Detén la conversación normal
+- Indica que un agente humano dará seguimiento
+- No intentes ayudar por tu cuenta
 `;
 
 /* ================= CHAT ENDPOINT ================= */
@@ -60,39 +54,43 @@ app.post("/chat", async (req, res) => {
       });
     }
 
-    // Inicializar sesión si no existe
+    // Inicializar sesión
     if (!sessions[sessionId]) {
       sessions[sessionId] = [
         { role: "system", content: SYSTEM_PROMPT },
       ];
     }
 
-    // Agregar mensaje del usuario al historial
+    // Guardar mensaje del usuario
     sessions[sessionId].push({
       role: "user",
       content: message,
     });
 
+    // Llamada a OpenAI
     const completion = await openai.chat.completions.create({
-      model: "gpt-4.1-mini",
+      model: "gpt-4o-mini",
       messages: sessions[sessionId],
       temperature: 0.6,
     });
 
-    const assistantReply = completion.choices[0].message.content;
+    const reply = completion.choices[0].message.content;
 
     // Guardar respuesta del asistente
     sessions[sessionId].push({
       role: "assistant",
-      content: assistantReply,
+      content: reply,
     });
 
-    res.json({
-      reply: assistantReply,
-    });
-  }catch (error) {
-  console.error("ERROR OPENAI:", error.response?.data || error.message);
-  res.status(500).json({ error: "No pude responder en este momento." });
+    res.json({ reply });
+  } catch (error) {
+    console.error(
+      "ERROR OPENAI:",
+      error.response?.data || error.message
+    );
+
+    res.status(500).json({
+      error: "No pude responder en este momento.",
     });
   }
 });
