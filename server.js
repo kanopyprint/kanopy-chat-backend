@@ -15,92 +15,100 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-/* ================= MEMORY STORE (SESSION BASED) ================= */
-// Estructura:
-// {
-//   sessionId: [
-//     { role: "system", content: "..." },
-//     { role: "user", content: "..." },
-//     { role: "assistant", content: "..." }
-//   ]
-// }
-const sessions = {};
-
 /* ================= SYSTEM PROMPT ================= */
 const SYSTEM_PROMPT = `
 Eres el asistente oficial de Kanopy.
 
-Personalidad y reglas:
-- Estilo joven, creativo y amistoso.
-- NO eres un vendedor agresivo.
-- Solo recomiendas productos si el cliente lo pide o muestra interés.
-- Guías correctamente cuando hay intención real de compra.
-- Puedes generar y compartir enlaces cuando sea relevante.
-- Respondes siempre en español.
+IDENTIDAD Y TONO:
+- Tono joven, creativo, cercano y respetuoso.
+- Hablas de forma amistosa, nunca robótica.
+- Respondes SIEMPRE en español.
+- No eres un vendedor agresivo.
+
+COMPORTAMIENTO:
+- Solo ayudas cuando el usuario lo pide explícitamente.
+- No interrumpes ni presionas para vender.
+- Si el usuario solo conversa, conversas.
+- Si el usuario muestra intención de compra, guías con calma y claridad.
+
+VENTAS:
+- Recomiendas productos solo si el cliente lo solicita o muestra interés.
 - Las lámparas inteligentes NO están a la venta actualmente.
+- Puedes explicar procesos de personalización y próximos pasos.
 
-Seguridad:
-- Si detectas temas de suicidio, depresión grave, peligro inminente,
+SEGURIDAD (MUY IMPORTANTE):
+- Si detectas temas de suicidio, depresión, peligro inminente, violencia,
   pobreza extrema u otros casos sensibles:
-  * Detén la conversación normal.
-  * Indica que un agente humano debe continuar.
-  * No intentes resolver la situación.
+  - NO intentes ayudar
+  - NO des consejos
+  - NO continúes la conversación
+  - Responde con un mensaje breve, empático y neutral
+  - Deriva inmediatamente a un agente humano
 
-Mantén respuestas claras, útiles y naturales.
+MENSAJE DE DERIVACIÓN HUMANA (usar exactamente este tono):
+"Lo siento, este es un tema delicado y prefiero que un miembro del equipo de Kanopy te ayude directamente.  
+Por favor contáctanos por WhatsApp para darte la mejor atención posible."
 `;
+
+/* ================= RISK DETECTION ================= */
+const RISK_KEYWORDS = [
+  "suicidio",
+  "matarme",
+  "quiero morir",
+  "depresión",
+  "me siento vacío",
+  "no quiero vivir",
+  "peligro",
+  "violencia",
+  "abuso",
+  "golpes",
+  "amenaza",
+  "no tengo comida",
+  "pobreza extrema",
+  "desesperado",
+];
 
 /* ================= CHAT ENDPOINT ================= */
 app.post("/chat", async (req, res) => {
   try {
-    const { message, sessionId } = req.body;
+    const { message } = req.body;
 
-    if (!message || !sessionId) {
-      return res.status(400).json({
-        error: "Faltan message o sessionId",
+    if (!message) {
+      return res.status(400).json({ error: "Mensaje vacío" });
+    }
+
+    const lowerMessage = message.toLowerCase();
+
+    // 🚨 Riesgo detectado → escalar a humano
+    const riskDetected = RISK_KEYWORDS.some((word) =>
+      lowerMessage.includes(word)
+    );
+
+    if (riskDetected) {
+      return res.json({
+        reply:
+          "Lo siento, este es un tema delicado y prefiero que un miembro del equipo de Kanopy te ayude directamente. " +
+          "Por favor contáctanos por WhatsApp para darte la mejor atención posible.",
       });
     }
 
-    // Inicializar sesión si no existe
-    if (!sessions[sessionId]) {
-      sessions[sessionId] = [
-        { role: "system", content: SYSTEM_PROMPT },
-      ];
-    }
-
-    // Agregar mensaje del usuario al historial
-    sessions[sessionId].push({
-      role: "user",
-      content: message,
-    });
-
+    // 🤖 OpenAI response
     const completion = await openai.chat.completions.create({
       model: "gpt-4.1-mini",
-      messages: sessions[sessionId],
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: message },
+      ],
       temperature: 0.6,
     });
 
-    const assistantReply = completion.choices[0].message.content;
-
-    // Guardar respuesta del asistente
-    sessions[sessionId].push({
-      role: "assistant",
-      content: assistantReply,
-    });
-
     res.json({
-      reply: assistantReply,
+      reply: completion.choices[0].message.content,
     });
   } catch (error) {
     console.error("Error en /chat:", error);
-    res.status(500).json({
-      error: "Error del servidor",
-    });
+    res.status(500).json({ error: "Error del servidor" });
   }
-});
-
-/* ================= HEALTH CHECK ================= */
-app.get("/", (req, res) => {
-  res.send("Kanopy Chat Backend activo ✅");
 });
 
 /* ================= START SERVER ================= */
