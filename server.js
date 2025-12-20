@@ -54,20 +54,17 @@ app.post("/chat", async (req, res) => {
       });
     }
 
-    // Inicializar sesión
     if (!sessions[sessionId]) {
       sessions[sessionId] = [
         { role: "system", content: SYSTEM_PROMPT },
       ];
     }
 
-    // Guardar mensaje del usuario
     sessions[sessionId].push({
       role: "user",
       content: message,
     });
 
-    // Llamada a OpenAI
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: sessions[sessionId],
@@ -76,7 +73,6 @@ app.post("/chat", async (req, res) => {
 
     const reply = completion.choices[0].message.content;
 
-    // Guardar respuesta del asistente
     sessions[sessionId].push({
       role: "assistant",
       content: reply,
@@ -84,10 +80,7 @@ app.post("/chat", async (req, res) => {
 
     res.json({ reply });
   } catch (error) {
-    console.error(
-      "ERROR OPENAI:",
-      error.response?.data || error.message
-    );
+    console.error("ERROR OPENAI:", error.message);
 
     res.status(500).json({
       error: "No pude responder en este momento.",
