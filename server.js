@@ -15,83 +15,58 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-/* ================= SYSTEM PROMPT KANOPY ================= */
+/* ================= SYSTEM PROMPT ================= */
 const SYSTEM_PROMPT = `
-Eres Kanopy, una marca creativa que crea piezas personalizadas para regalar y coleccionar.
+Eres el asistente oficial de Kanopy.
 
-Hablas como una marca, no como una persona individual.
-Tu tono es joven, creativo, claro y respetuoso.
-Ayudas solo cuando el cliente lo pide y no empujas ventas.
+IDENTIDAD Y TONO:
+- Tono joven, creativo, cercano y respetuoso.
+- Hablas de forma amistosa, nunca robótica.
+- Respondes SIEMPRE en español.
+- No eres un vendedor agresivo.
 
-Nunca enfatizas la tecnología ni mencionas impresión 3D.
-Te enfocas en el valor, el diseño y la experiencia.
+COMPORTAMIENTO:
+- Solo ayudas cuando el usuario lo pide explícitamente.
+- No interrumpes ni presionas para vender.
+- Si el usuario solo conversa, conversas.
+- Si el usuario muestra intención de compra, guías con calma y claridad.
 
-Puedes:
-- Explicar productos y procesos
-- Orientar a clientes
-- Acompañar paso a paso una compra SOLO si el cliente muestra intención clara
+VENTAS:
+- Recomiendas productos solo si el cliente lo solicita o muestra interés.
+- Las lámparas inteligentes NO están a la venta actualmente.
+- Puedes explicar procesos de personalización y próximos pasos.
 
-No puedes:
-- Confirmar pedidos
-- Dar estados de órdenes
-- Prometer fechas exactas
-- Dar asesoría médica, legal o psicológica
-- Involucrarte en crisis personales
+SEGURIDAD (MUY IMPORTANTE):
+- Si detectas temas de suicidio, depresión, peligro inminente, violencia,
+  pobreza extrema u otros casos sensibles:
+  - NO intentes ayudar
+  - NO des consejos
+  - NO continúes la conversación
+  - Responde con un mensaje breve, empático y neutral
+  - Deriva inmediatamente a un agente humano
 
-USO DE EMOJIS:
-- Permitidos solo en mensajes amistosos
-- Prohibidos en reclamos o situaciones sensibles
-
-CASOS EXTREMOS:
-Si el usuario menciona suicidio, violencia, depresión grave, pobreza extrema o peligro inminente:
-- Responde con empatía mínima
-- Di que Kanopy no puede ayudar con ese tema
-- Deriva a un agente humano
-- No continúes la conversación sobre el tema
-
-Respondes siempre en español.
+MENSAJE DE DERIVACIÓN HUMANA (usar exactamente este tono):
+"Lo siento, este es un tema delicado y prefiero que un miembro del equipo de Kanopy te ayude directamente.  
+Por favor contáctanos por WhatsApp para darte la mejor atención posible."
 `;
 
-/* ================= DETECCIÓN DE RIESGO ================= */
-const dangerKeywords = [
+/* ================= RISK DETECTION ================= */
+const RISK_KEYWORDS = [
   "suicidio",
   "matarme",
-  "no quiero vivir",
-  "me quiero morir",
+  "quiero morir",
   "depresión",
-  "deprimido",
+  "me siento vacío",
+  "no quiero vivir",
+  "peligro",
   "violencia",
-  "arma",
+  "abuso",
+  "golpes",
   "amenaza",
   "no tengo comida",
   "pobreza extrema",
+  "desesperado",
 ];
-
-function isDanger(message) {
-  return dangerKeywords.some((word) =>
-    message.toLowerCase().includes(word)
-  );
-}
-
-/* ================= DETECCIÓN DE INTENCIÓN DE COMPRA ================= */
-const buyKeywords = [
-  "comprar",
-  "precio",
-  "pedido",
-  "ordenar",
-  "envío",
-  "me interesa",
-  "quiero este",
-  "cómo compro",
-];
-
-function hasBuyIntent(message) {
-  return (
-    buyKeywords.filter((word) =>
-      message.toLowerCase().includes(word)
-    ).length >= 2
-  );
-}
 
 /* ================= CHAT ENDPOINT ================= */
 app.post("/chat", async (req, res) => {
@@ -102,34 +77,28 @@ app.post("/chat", async (req, res) => {
       return res.status(400).json({ error: "Mensaje vacío" });
     }
 
-    /* 🔴 CASOS EXTREMOS: CORTE INMEDIATO */
-    if (isDanger(message)) {
+    const lowerMessage = message.toLowerCase();
+
+    // 🚨 Riesgo detectado → escalar a humano
+    const riskDetected = RISK_KEYWORDS.some((word) =>
+      lowerMessage.includes(word)
+    );
+
+    if (riskDetected) {
       return res.json({
         reply:
-          "Lamentamos que estés pasando por una situación así. En Kanopy no podemos ayudar con este tipo de temas, pero es importante que recibas apoyo adecuado. Te recomendamos contactar a un profesional o a alguien de confianza.",
+          "Lo siento, este es un tema delicado y prefiero que un miembro del equipo de Kanopy te ayude directamente. " +
+          "Por favor contáctanos por WhatsApp para darte la mejor atención posible.",
       });
     }
 
-    /* 🟡 DEFINIR MODO */
-    const mode = hasBuyIntent(message)
-      ? "GUIDED_PURCHASE"
-      : "NORMAL_HELP";
-
-    const messages = [
-      { role: "system", content: SYSTEM_PROMPT },
-      {
-        role: "system",
-        content:
-          mode === "GUIDED_PURCHASE"
-            ? "El usuario muestra intención clara de compra. Guía paso a paso sin presión."
-            : "El usuario busca información general. Ayuda sin intentar vender.",
-      },
-      { role: "user", content: message },
-    ];
-
+    // 🤖 OpenAI response
     const completion = await openai.chat.completions.create({
       model: "gpt-4.1-mini",
-      messages,
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: message },
+      ],
       temperature: 0.6,
     });
 
@@ -138,10 +107,7 @@ app.post("/chat", async (req, res) => {
     });
   } catch (error) {
     console.error("Error en /chat:", error);
-    res.status(500).json({
-      reply:
-        "Ocurrió un problema al procesar tu mensaje. Nuestro equipo puede ayudarte directamente si lo necesitas.",
-    });
+    res.status(500).json({ error: "Error del servidor" });
   }
 });
 
