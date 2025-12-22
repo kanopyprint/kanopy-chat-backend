@@ -114,6 +114,15 @@ Productos:
 - Respondes SIEMPRE en español
 `;
 
+/* ================= UTIL: DELAY HUMANO ================= */
+function humanDelay() {
+  const min = 1200;
+  const max = 1800;
+  return new Promise(resolve =>
+    setTimeout(resolve, Math.random() * (max - min) + min)
+  );
+}
+
 /* ================= CHAT ENDPOINT ================= */
 app.post("/chat", async (req, res) => {
   try {
@@ -129,7 +138,6 @@ app.post("/chat", async (req, res) => {
       sessions[sid] = [{ role: "system", content: SYSTEM_PROMPT }];
     }
 
-    // intención de compra
     const wantsProducts =
       /precio|comprar|producto|tienda|recomienda|disponible|venta|link|enlace/i.test(
         message
@@ -158,14 +166,13 @@ app.post("/chat", async (req, res) => {
         sessions[sid].push({
           role: "system",
           content:
-            "En este momento no pude obtener el catálogo. Si el cliente desea, ofrece ayuda general sin links.",
+            "En este momento no pude obtener el catálogo. Ofrece ayuda general sin links.",
         });
       }
     }
 
     sessions[sid].push({ role: "user", content: message });
 
-    // recortar historial
     if (sessions[sid].length > MAX_HISTORY) {
       sessions[sid] = [
         sessions[sid][0],
@@ -182,6 +189,9 @@ app.post("/chat", async (req, res) => {
     const reply = completion.choices[0].message.content;
 
     sessions[sid].push({ role: "assistant", content: reply });
+
+    // ⏳ Delay humano ANTES de responder
+    await humanDelay();
 
     res.json({ reply });
   } catch (error) {
