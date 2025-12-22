@@ -83,24 +83,22 @@ const MAX_HISTORY = 12;
 const SYSTEM_PROMPT = `
 Eres el asistente oficial de Kanopy.
 
-Contexto del negocio (OBLIGATORIO):
-- En este momento Kanopy SOLO vende llaveros
+Contexto del negocio:
+- Kanopy SOLO vende llaveros
 - Todos los productos publicados están disponibles
 - No dependes de inventario
-- Nunca digas que "no hay" por stock
-- Si un producto existe en Shopify, puedes ofrecerlo
-- Si no existe, NO lo inventes
+- Nunca digas que no hay stock
+- Nunca inventes productos, enlaces ni precios
 
 Pedidos personalizados:
 - Se aceptan
 - Se derivan a WhatsApp
-- No tomas pedidos personalizados dentro del chat
+- No se toman dentro del chat
 
 Reglas:
-- Nunca inventas productos
-- Nunca inventas enlaces
-- Si no tienes certeza, lo dices claramente
-- Usas SOLO la información recibida desde Shopify
+- Usa SOLO productos reales de Shopify
+- Si no existe, dilo con claridad
+- Links siempre deben ser reales
 
 Idioma:
 - Español siempre
@@ -111,4 +109,73 @@ app.post("/chat", async (req, res) => {
   try {
     const { message, sessionId } = req.body;
     if (!message) {
-      return res.status(400
+      return res.status(400).json({ error: "Mensaje vacío" });
+    }
+
+    const sid = sessionId || "default";
+
+    if (!sessions[sid]) {
+      sessions[sid] = [{ role: "system", content: SYSTEM_PROMPT }];
+    }
+
+    const wantsProducts =
+      /precio|comprar|producto|llavero|tienda|disponible|venta|link|enlace/i.test(
+        message
+      );
+
+    if (wantsProducts) {
+      const products = await getProducts();
+
+      if (products.length > 0) {
+        const productContext =
+          "Catálogo real de Kanopy (llaveros disponibles):\n" +
+          products
+            .map(p => `- ${p.title} | ${p.price} | ${p.url}`)
+            .join("\n");
+
+        sessions[sid].push({
+          role: "system",
+          content: productContext,
+        });
+      } else {
+        sessions[sid].push({
+          role: "system",
+          content:
+            "Si el cliente pregunta por productos, indica que el catálogo se está ampliando, sin inventar opciones.",
+        });
+      }
+    }
+
+    sessions[sid].push({ role: "user", content: message });
+
+    if (sessions[sid].length > MAX_HISTORY) {
+      sessions[sid] = [
+        sessions[sid][0],
+        ...sessions[sid].slice(-MAX_HISTORY),
+      ];
+    }
+
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4.1-mini",
+      messages: sessions[sid],
+      temperature: 0.6,
+    });
+
+    const reply = completion.choices[0].message.content;
+
+    sessions[sid].push({ role: "assistant", content: reply });
+
+    res.json({ reply });
+  } catch (error) {
+    console.error("❌ Chat error:", error);
+    res.status(500).json({
+      reply:
+        "Ahora mismo no pude responder correctamente. Un agente humano puede ayudarte.",
+    });
+  }
+});
+
+/* ================= START ================= */
+app.listen(PORT, () => {
+  console.log(`✅ Kanopy Chat Backend activo en puerto ${PORT}`);
+});
