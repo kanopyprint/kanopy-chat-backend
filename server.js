@@ -19,60 +19,50 @@ const openai = new OpenAI({
 /* ================= SHOPIFY ================= */
 const SHOPIFY_ENDPOINT = `https://${process.env.SHOPIFY_STORE_DOMAIN}/api/2024-01/graphql.json`;
 
-async function getProductsSafe() {
-  try {
-    const query = `
-      query {
-        products(first: 6) {
-          edges {
-            node {
-              title
-              handle
-              availableForSale
-              priceRange {
-                minVariantPrice {
-                  amount
-                  currencyCode
-                }
+async function fetchShopify(query, variables = {}) {
+  const response = await fetch(SHOPIFY_ENDPOINT, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Storefront-Access-Token":
+        process.env.SHOPIFY_STOREFRONT_TOKEN,
+    },
+    body: JSON.stringify({ query, variables }),
+  });
+
+  const data = await response.json();
+  return data;
+}
+
+async function getProducts() {
+  const query = `
+    query {
+      products(first: 6) {
+        edges {
+          node {
+            title
+            handle
+            availableForSale
+            priceRange {
+              minVariantPrice {
+                amount
+                currencyCode
               }
             }
           }
         }
       }
-    `;
+    }
+  `;
 
-    const response = await fetch(SHOPIFY_ENDPOINT, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Shopify-Storefront-Access-Token":
-          process.env.SHOPIFY_STOREFRONT_TOKEN,
-      },
-      body: JSON.stringify({ query }),
-    });
-
-    const data = await response.json();
-
-    if (!data?.data?.products?.edges) return "";
-
-    return (
-      "Productos disponibles:\n" +
-      data.data.products.edges
-        .map(e => {
-          const p = e.node;
-          return `- ${p.title} | ${p.priceRange.minVariantPrice.amount} ${p.priceRange.minVariantPrice.currencyCode} | ${
-            p.availableForSale ? "Disponible" : "No disponible"
-          } | https://${process.env.SHOPIFY_STORE_DOMAIN}/products/${p.handle}`;
-        })
-        .join("\n")
-    );
-  } catch {
-    return "";
-  }
+  const data = await fetchShopify(query);
+  return data.data.products.edges.map(e => ({
+    title: e.node.title,
+    price: `${e.node.priceRange.minVariantPrice.amount} ${e.node.priceRange.minVariantPrice.currencyCode}`,
+    available: e.node.availableForSale,
+    url: `https://${process.env.SHOPIFY_STORE_DOMAIN}/products/${e.node.handle}`
+  }));
 }
-
-/* ================= MEMORY ================= */
-const sessions = {};
 
 /* ================= SYSTEM PROMPT ================= */
 const SYSTEM_PROMPT = `
@@ -84,80 +74,79 @@ Tono:
 - NO agresivo
 - NO insistente
 
-Reglas:
+Reglas clave:
 - Solo ayudas cuando el cliente lo pide
 - Si hay intención de compra, guías con claridad
-- Nunca presionas
+- Nunca presionas para vender
 - Nunca inventas información
+- Si no sabes algo, lo dices
 
-Casos sensibles:
-Si detectas suicidio, depresión severa o peligro:
-- DETENTE
-- Di que un agente humano continuará
+Casos sensibles (OBLIGATORIO):
+Si detectas suicidio, depresión severa, peligro inminente,
+pobreza extrema o crisis emocional:
+- DETENTE inmediatamente
+- No intentes ayudar
+- Di que un agente humano dará seguimiento
 
 Productos:
-- Usas SOLO datos reales de Shopify
+- Usas SOLO los datos reales de Shopify
+- No mencionas lámparas inteligentes (no están a la venta)
 - Respondes SIEMPRE en español
 `;
 
-/* ================= CHAT ================= */
+/* ================= CHAT ENDPOINT ================= */
 app.post("/chat", async (req, res) => {
   try {
-    const { message, sessionId } = req.body;
+    const { message } = req.body;
 
-    if (!message || !sessionId) {
-      return res.status(400).json({ error: "Faltan datos" });
+    if (!message) {
+      return res.status(400).json({ error: "Mensaje vacío" });
     }
 
-    if (!sessions[sessionId]) {
-      sessions[sessionId] = [];
-    }
-
+    // Heurística simple de intención de compra
     const wantsProducts =
       /precio|comprar|producto|tienda|recomienda|disponible|venta/i.test(
         message
       );
 
-    const messages = [
-      { role: "system", content: SYSTEM_PROMPT },
-      ...sessions[sessionId],
-    ];
+    let productContext = "";
 
     if (wantsProducts) {
-      const productContext = await getProductsSafe();
-      if (productContext) {
-        messages.push({
-          role: "system",
-          content: productContext,
-        });
-      }
+      const products = await getProducts();
+      productContext =
+        "Productos disponibles:\n" +
+        products
+          .map(
+            p =>
+              `- ${p.title} | ${p.price} | ${
+                p.available ? "Disponible" : "No disponible"
+              } | ${p.url}`
+          )
+          .join("\n");
     }
-
-    messages.push({ role: "user", content: message });
 
     const completion = await openai.chat.completions.create({
       model: "gpt-4.1-mini",
-      messages,
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        ...(productContext
+          ? [{ role: "system", content: productContext }]
+          : []),
+        { role: "user", content: message },
+      ],
       temperature: 0.6,
     });
 
-    const reply = completion.choices[0].message.content;
-
-    sessions[sessionId].push(
-      { role: "user", content: message },
-      { role: "assistant", content: reply }
-    );
-
-    res.json({ reply });
-  } catch (err) {
-    console.error("ERROR CHAT:", err);
-    res.status(500).json({
-      error: "No pude responder en este momento.",
+    res.json({
+      reply: completion.choices[0].message.content,
     });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error del servidor" });
   }
 });
 
 /* ================= START ================= */
 app.listen(PORT, () => {
-  console.log(`Kanopy Chat activo en puerto ${PORT}`);
+  console.log(`Kanopy Chat Backend activo en puerto ${PORT}`);
 });
