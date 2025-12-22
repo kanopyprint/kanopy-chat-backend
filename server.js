@@ -19,28 +19,8 @@ const openai = new OpenAI({
 /* ================= SHOPIFY ================= */
 const SHOPIFY_ENDPOINT = `https://${process.env.SHOPIFY_STORE_DOMAIN}/api/2024-01/graphql.json`;
 
-async function getProductsSafe() {
+async function fetchShopify(query, variables = {}) {
   try {
-    const query = `
-      query {
-        products(first: 6) {
-          edges {
-            node {
-              title
-              handle
-              availableForSale
-              priceRange {
-                minVariantPrice {
-                  amount
-                  currencyCode
-                }
-              }
-            }
-          }
-        }
-      }
-    `;
-
     const response = await fetch(SHOPIFY_ENDPOINT, {
       method: "POST",
       headers: {
@@ -48,31 +28,61 @@ async function getProductsSafe() {
         "X-Shopify-Storefront-Access-Token":
           process.env.SHOPIFY_STOREFRONT_TOKEN,
       },
-      body: JSON.stringify({ query }),
+      body: JSON.stringify({ query, variables }),
     });
 
     const data = await response.json();
 
-    if (!data?.data?.products?.edges) return "";
+    if (data.errors) {
+      console.error("❌ Shopify GraphQL errors:", data.errors);
+      return null;
+    }
 
-    return (
-      "Productos disponibles:\n" +
-      data.data.products.edges
-        .map(e => {
-          const p = e.node;
-          return `- ${p.title} | ${p.priceRange.minVariantPrice.amount} ${p.priceRange.minVariantPrice.currencyCode} | ${
-            p.availableForSale ? "Disponible" : "No disponible"
-          } | https://${process.env.SHOPIFY_STORE_DOMAIN}/products/${p.handle}`;
-        })
-        .join("\n")
-    );
-  } catch {
-    return "";
+    return data.data;
+  } catch (err) {
+    console.error("❌ Shopify fetch failed:", err);
+    return null;
   }
 }
 
-/* ================= MEMORY ================= */
+async function getProducts() {
+  const query = `
+    query {
+      products(first: 6) {
+        edges {
+          node {
+            title
+            handle
+            availableForSale
+            priceRange {
+              minVariantPrice {
+                amount
+                currencyCode
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  const data = await fetchShopify(query);
+
+  if (!data || !data.products) {
+    return null;
+  }
+
+  return data.products.edges.map(e => ({
+    title: e.node.title,
+    price: `${e.node.priceRange.minVariantPrice.amount} ${e.node.priceRange.minVariantPrice.currencyCode}`,
+    available: e.node.availableForSale,
+    url: `https://${process.env.SHOPIFY_STORE_DOMAIN}/products/${e.node.handle}`
+  }));
+}
+
+/* ================= SESSION MEMORY ================= */
 const sessions = {};
+const MAX_HISTORY = 12;
 
 /* ================= SYSTEM PROMPT ================= */
 const SYSTEM_PROMPT = `
@@ -84,80 +94,106 @@ Tono:
 - NO agresivo
 - NO insistente
 
-Reglas:
+Reglas clave:
 - Solo ayudas cuando el cliente lo pide
 - Si hay intención de compra, guías con claridad
-- Nunca presionas
+- Nunca presionas para vender
 - Nunca inventas información
+- Si no sabes algo, lo dices
 
-Casos sensibles:
-Si detectas suicidio, depresión severa o peligro:
-- DETENTE
-- Di que un agente humano continuará
+Casos sensibles (OBLIGATORIO):
+Si detectas suicidio, depresión severa, peligro inminente,
+pobreza extrema o crisis emocional:
+- DETENTE inmediatamente
+- No intentes ayudar
+- Di que un agente humano dará seguimiento
 
 Productos:
 - Usas SOLO datos reales de Shopify
+- No mencionas lámparas inteligentes
 - Respondes SIEMPRE en español
 `;
 
-/* ================= CHAT ================= */
+/* ================= CHAT ENDPOINT ================= */
 app.post("/chat", async (req, res) => {
   try {
     const { message, sessionId } = req.body;
 
-    if (!message || !sessionId) {
-      return res.status(400).json({ error: "Faltan datos" });
+    if (!message) {
+      return res.status(400).json({ error: "Mensaje vacío" });
     }
 
-    if (!sessions[sessionId]) {
-      sessions[sessionId] = [];
+    const sid = sessionId || "default";
+
+    if (!sessions[sid]) {
+      sessions[sid] = [{ role: "system", content: SYSTEM_PROMPT }];
     }
 
+    // intención de compra
     const wantsProducts =
-      /precio|comprar|producto|tienda|recomienda|disponible|venta/i.test(
+      /precio|comprar|producto|tienda|recomienda|disponible|venta|link|enlace/i.test(
         message
       );
 
-    const messages = [
-      { role: "system", content: SYSTEM_PROMPT },
-      ...sessions[sessionId],
-    ];
-
     if (wantsProducts) {
-      const productContext = await getProductsSafe();
-      if (productContext) {
-        messages.push({
+      const products = await getProducts();
+
+      if (products) {
+        const productContext =
+          "Productos disponibles:\n" +
+          products
+            .map(
+              p =>
+                `- ${p.title} | ${p.price} | ${
+                  p.available ? "Disponible" : "No disponible"
+                } | ${p.url}`
+            )
+            .join("\n");
+
+        sessions[sid].push({
           role: "system",
           content: productContext,
+        });
+      } else {
+        sessions[sid].push({
+          role: "system",
+          content:
+            "En este momento no pude obtener el catálogo. Si el cliente desea, ofrece ayuda general sin links.",
         });
       }
     }
 
-    messages.push({ role: "user", content: message });
+    sessions[sid].push({ role: "user", content: message });
+
+    // recortar historial
+    if (sessions[sid].length > MAX_HISTORY) {
+      sessions[sid] = [
+        sessions[sid][0],
+        ...sessions[sid].slice(-MAX_HISTORY),
+      ];
+    }
 
     const completion = await openai.chat.completions.create({
       model: "gpt-4.1-mini",
-      messages,
+      messages: sessions[sid],
       temperature: 0.6,
     });
 
     const reply = completion.choices[0].message.content;
 
-    sessions[sessionId].push(
-      { role: "user", content: message },
-      { role: "assistant", content: reply }
-    );
+    sessions[sid].push({ role: "assistant", content: reply });
 
     res.json({ reply });
-  } catch (err) {
-    console.error("ERROR CHAT:", err);
+  } catch (error) {
+    console.error("❌ Chat error:", error);
     res.status(500).json({
-      error: "No pude responder en este momento.",
+      reply:
+        "Ahora mismo no pude responder correctamente. Un agente humano puede ayudarte en breve.",
     });
   }
 });
 
 /* ================= START ================= */
 app.listen(PORT, () => {
-  console.log(`Kanopy Chat activo en puerto ${PORT}`);
+  console.log(`Kanopy Chat Backend activo en puerto ${PORT}`);
 });
