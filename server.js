@@ -48,7 +48,7 @@ async function fetchShopify(query, variables = {}) {
 async function getProducts() {
   const query = `
     query {
-      products(first: 6) {
+      products(first: 20) {
         edges {
           node {
             title
@@ -66,13 +66,12 @@ async function getProducts() {
   `;
 
   const data = await fetchShopify(query);
-
-  if (!data || !data.products) return null;
+  if (!data || !data.products) return [];
 
   return data.products.edges.map(e => ({
     title: e.node.title,
     price: `${e.node.priceRange.minVariantPrice.amount} ${e.node.priceRange.minVariantPrice.currencyCode}`,
-    url: `https://${process.env.SHOPIFY_STORE_DOMAIN}/products/${e.node.handle}`
+    url: `https://${process.env.SHOPIFY_STORE_DOMAIN}/products/${e.node.handle}`,
   }));
 }
 
@@ -86,113 +85,30 @@ Eres el asistente oficial de Kanopy.
 
 Contexto del negocio (OBLIGATORIO):
 - En este momento Kanopy SOLO vende llaveros
-- NO existen otros productos
-- NO inventes materiales, tipos ni variantes
-- Si un producto no existe en Shopify, NO lo menciones
 - Todos los productos publicados están disponibles
+- No dependes de inventario
+- Nunca digas que "no hay" por stock
+- Si un producto existe en Shopify, puedes ofrecerlo
+- Si no existe, NO lo inventes
 
 Pedidos personalizados:
 - Se aceptan
-- El cliente debe ser dirigido a WhatsApp
+- Se derivan a WhatsApp
 - No tomas pedidos personalizados dentro del chat
 
-Tono:
-- Joven, creativo y amistoso
-- Profesional y claro
-- Nunca insistente
-- Nunca agresivo
-
-Reglas clave:
-- Solo ayudas cuando el cliente lo pide
-- Si hay intención de compra, guías con claridad
-- Nunca inventas información
-- Si no sabes algo, lo dices
-
-Casos sensibles:
-Si detectas crisis emocional o peligro:
-- Detente
-- Indica que un agente humano dará seguimiento
+Reglas:
+- Nunca inventas productos
+- Nunca inventas enlaces
+- Si no tienes certeza, lo dices claramente
+- Usas SOLO la información recibida desde Shopify
 
 Idioma:
-- Respondes SIEMPRE en español
+- Español siempre
 `;
 
 /* ================= CHAT ENDPOINT ================= */
 app.post("/chat", async (req, res) => {
   try {
     const { message, sessionId } = req.body;
-
     if (!message) {
-      return res.status(400).json({ error: "Mensaje vacío" });
-    }
-
-    const sid = sessionId || "default";
-
-    if (!sessions[sid]) {
-      sessions[sid] = [{ role: "system", content: SYSTEM_PROMPT }];
-    }
-
-    const wantsProducts =
-      /precio|comprar|producto|tienda|recomienda|disponible|venta|link|enlace/i.test(
-        message
-      );
-
-    if (wantsProducts) {
-      const products = await getProducts();
-
-      if (products && products.length > 0) {
-        const productContext =
-          "Catálogo actual de Kanopy (llaveros disponibles):\n" +
-          products
-            .map(
-              p =>
-                `- ${p.title} | ${p.price} | ${p.url}`
-            )
-            .join("\n");
-
-        sessions[sid].push({
-          role: "system",
-          content: productContext,
-        });
-      } else {
-        sessions[sid].push({
-          role: "system",
-          content:
-            "Si el cliente pregunta por productos, indica que actualmente el catálogo es pequeño y se está ampliando, sin inventar opciones.",
-        });
-      }
-    }
-
-    sessions[sid].push({ role: "user", content: message });
-
-    if (sessions[sid].length > MAX_HISTORY) {
-      sessions[sid] = [
-        sessions[sid][0],
-        ...sessions[sid].slice(-MAX_HISTORY),
-      ];
-    }
-
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4.1-mini",
-      messages: sessions[sid],
-      temperature: 0.6,
-    });
-
-    const reply = completion.choices[0].message.content;
-
-    sessions[sid].push({ role: "assistant", content: reply });
-
-    res.json({ reply });
-  } catch (error) {
-    console.error("❌ Chat error:", error);
-    res.status(500).json({
-      reply:
-        "Ahora mismo no pude responder correctamente. Un agente humano puede ayudarte en breve.",
-    });
-  }
-});
-
-/* ================= START ================= */
-app.listen(PORT, () => {
-  console.log(`Kanopy Chat Backend activo en puerto ${PORT}`);
-});
+      return res.status(400
