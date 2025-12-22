@@ -48,13 +48,11 @@ async function fetchShopify(query, variables = {}) {
 async function getProducts() {
   const query = `
     query {
-      products(first: 10) {
+      products(first: 6) {
         edges {
           node {
             title
             handle
-            availableForSale
-            productType
             priceRange {
               minVariantPrice {
                 amount
@@ -68,18 +66,14 @@ async function getProducts() {
   `;
 
   const data = await fetchShopify(query);
-  if (!data || !data.products) return [];
 
-  // 🔒 SOLO LLAVEROS
-  return data.products.edges
-    .map(e => e.node)
-    .filter(p => /llavero/i.test(p.productType || p.title))
-    .map(p => ({
-      title: p.title,
-      price: `${p.priceRange.minVariantPrice.amount} ${p.priceRange.minVariantPrice.currencyCode}`,
-      available: p.availableForSale,
-      url: `https://${process.env.SHOPIFY_STORE_DOMAIN}/products/${p.handle}`
-    }));
+  if (!data || !data.products) return null;
+
+  return data.products.edges.map(e => ({
+    title: e.node.title,
+    price: `${e.node.priceRange.minVariantPrice.amount} ${e.node.priceRange.minVariantPrice.currencyCode}`,
+    url: `https://${process.env.SHOPIFY_STORE_DOMAIN}/products/${e.node.handle}`
+  }));
 }
 
 /* ================= SESSION MEMORY ================= */
@@ -90,35 +84,44 @@ const MAX_HISTORY = 12;
 const SYSTEM_PROMPT = `
 Eres el asistente oficial de Kanopy.
 
-Contexto del negocio:
-- Kanopy vende ACTUALMENTE solo llaveros
-- No existen llaveros metálicos ni otros materiales no listados
-- El catálogo es pequeño y real
-- Nunca inventes productos, materiales, precios o enlaces
+Contexto del negocio (OBLIGATORIO):
+- En este momento Kanopy SOLO vende llaveros
+- NO existen otros productos
+- NO inventes materiales, tipos ni variantes
+- Si un producto no existe en Shopify, NO lo menciones
+- Todos los productos publicados están disponibles
 
-Reglas OBLIGATORIAS:
-- Solo hablas de productos entregados por el sistema
-- Si algo no existe, lo dices claramente
-- Nunca escribas "enlace aquí" ni links inventados
-- Los links SOLO pueden ser los proporcionados por el sistema
-- Para pedidos personalizados:
-  - NO inventas opciones
-  - Derivas a WhatsApp con un agente humano
+Pedidos personalizados:
+- Se aceptan
+- El cliente debe ser dirigido a WhatsApp
+- No tomas pedidos personalizados dentro del chat
 
 Tono:
-- Cercano
-- Claro
-- Honesto
-- Sin presión de venta
+- Joven, creativo y amistoso
+- Profesional y claro
+- Nunca insistente
+- Nunca agresivo
+
+Reglas clave:
+- Solo ayudas cuando el cliente lo pide
+- Si hay intención de compra, guías con claridad
+- Nunca inventas información
+- Si no sabes algo, lo dices
+
+Casos sensibles:
+Si detectas crisis emocional o peligro:
+- Detente
+- Indica que un agente humano dará seguimiento
 
 Idioma:
-- Español siempre
+- Respondes SIEMPRE en español
 `;
 
 /* ================= CHAT ENDPOINT ================= */
 app.post("/chat", async (req, res) => {
   try {
     const { message, sessionId } = req.body;
+
     if (!message) {
       return res.status(400).json({ error: "Mensaje vacío" });
     }
@@ -130,22 +133,20 @@ app.post("/chat", async (req, res) => {
     }
 
     const wantsProducts =
-      /precio|comprar|producto|llavero|disponible|venta|link|enlace/i.test(
+      /precio|comprar|producto|tienda|recomienda|disponible|venta|link|enlace/i.test(
         message
       );
 
     if (wantsProducts) {
       const products = await getProducts();
 
-      if (products.length > 0) {
+      if (products && products.length > 0) {
         const productContext =
-          "Catálogo REAL de llaveros disponibles:\n" +
+          "Catálogo actual de Kanopy (llaveros disponibles):\n" +
           products
             .map(
               p =>
-                `- ${p.title} | ${p.price} | ${
-                  p.available ? "Disponible" : "No disponible"
-                } | ${p.url}`
+                `- ${p.title} | ${p.price} | ${p.url}`
             )
             .join("\n");
 
@@ -157,18 +158,9 @@ app.post("/chat", async (req, res) => {
         sessions[sid].push({
           role: "system",
           content:
-            "Actualmente no hay llaveros disponibles en la tienda. No inventes productos.",
+            "Si el cliente pregunta por productos, indica que actualmente el catálogo es pequeño y se está ampliando, sin inventar opciones.",
         });
       }
-    }
-
-    // pedidos personalizados
-    if (/personalizado|custom|a pedido/i.test(message)) {
-      sessions[sid].push({
-        role: "system",
-        content:
-          "Para pedidos personalizados, indica que un agente humano puede ayudar vía WhatsApp: https://wa.me/18094400062",
-      });
     }
 
     sessions[sid].push({ role: "user", content: message });
@@ -183,10 +175,11 @@ app.post("/chat", async (req, res) => {
     const completion = await openai.chat.completions.create({
       model: "gpt-4.1-mini",
       messages: sessions[sid],
-      temperature: 0.4,
+      temperature: 0.6,
     });
 
     const reply = completion.choices[0].message.content;
+
     sessions[sid].push({ role: "assistant", content: reply });
 
     res.json({ reply });
@@ -194,7 +187,7 @@ app.post("/chat", async (req, res) => {
     console.error("❌ Chat error:", error);
     res.status(500).json({
       reply:
-        "Ahora mismo no pude responder correctamente. Un agente humano puede ayudarte por WhatsApp.",
+        "Ahora mismo no pude responder correctamente. Un agente humano puede ayudarte en breve.",
     });
   }
 });
