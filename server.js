@@ -56,13 +56,17 @@ async function getProducts() {
   `;
 
   const data = await fetchShopify(query);
+
   return data.data.products.edges.map(e => ({
     title: e.node.title,
     price: `${e.node.priceRange.minVariantPrice.amount} ${e.node.priceRange.minVariantPrice.currencyCode}`,
     available: e.node.availableForSale,
-    url: `https://${process.env.SHOPIFY_STORE_DOMAIN}/products/${e.node.handle}`
+    url: `https://${process.env.SHOPIFY_STORE_DOMAIN}/products/${e.node.handle}`,
   }));
 }
+
+/* ================= SESSION MEMORY ================= */
+const sessions = {};
 
 /* ================= SYSTEM PROMPT ================= */
 const SYSTEM_PROMPT = `
@@ -97,10 +101,19 @@ Productos:
 /* ================= CHAT ENDPOINT ================= */
 app.post("/chat", async (req, res) => {
   try {
-    const { message } = req.body;
+    const { message, sessionId } = req.body;
 
-    if (!message) {
-      return res.status(400).json({ error: "Mensaje vacío" });
+    if (!message || !sessionId) {
+      return res.status(400).json({
+        error: "Se requiere message y sessionId",
+      });
+    }
+
+    // Crear sesión si no existe
+    if (!sessions[sessionId]) {
+      sessions[sessionId] = [
+        { role: "system", content: SYSTEM_PROMPT },
+      ];
     }
 
     // Heurística simple de intención de compra
@@ -109,11 +122,10 @@ app.post("/chat", async (req, res) => {
         message
       );
 
-    let productContext = "";
-
     if (wantsProducts) {
       const products = await getProducts();
-      productContext =
+
+      const productContext =
         "Productos disponibles:\n" +
         products
           .map(
@@ -123,27 +135,45 @@ app.post("/chat", async (req, res) => {
               } | ${p.url}`
           )
           .join("\n");
+
+      sessions[sessionId].push({
+        role: "system",
+        content: productContext,
+      });
     }
+
+    // Agregar mensaje del usuario
+    sessions[sessionId].push({
+      role: "user",
+      content: message,
+    });
 
     const completion = await openai.chat.completions.create({
       model: "gpt-4.1-mini",
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        ...(productContext
-          ? [{ role: "system", content: productContext }]
-          : []),
-        { role: "user", content: message },
-      ],
+      messages: sessions[sessionId],
       temperature: 0.6,
     });
 
-    res.json({
-      reply: completion.choices[0].message.content,
+    const reply = completion.choices[0].message.content;
+
+    // Guardar respuesta del asistente
+    sessions[sessionId].push({
+      role: "assistant",
+      content: reply,
     });
+
+    res.json({ reply });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Error del servidor" });
+    console.error("CHAT ERROR:", error);
+    res.status(500).json({
+      error: "No pude responder en este momento.",
+    });
   }
+});
+
+/* ================= HEALTH CHECK ================= */
+app.get("/", (req, res) => {
+  res.send("Kanopy Chat Backend activo ✅");
 });
 
 /* ================= START ================= */
