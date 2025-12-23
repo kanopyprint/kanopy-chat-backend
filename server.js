@@ -83,6 +83,18 @@ const MAX_HISTORY = 12;
 const SYSTEM_PROMPT = `
 Eres el asistente oficial de Kanopy.
 
+FORMATO DE RESPUESTA (OBLIGATORIO):
+- NO uses Markdown
+- NO uses [texto](link)
+- NO inventes etiquetas HTML
+- Los links deben ser URLs planas completas (https://...)
+
+REGLA CRÍTICA DE PRODUCTOS:
+- SOLO puedes mencionar productos que estén listados explícitamente en el catálogo que se te proporciona
+- Si un producto no está en el catálogo, responde: 
+  "Actualmente no tenemos ese llavero disponible en la tienda"
+- NO inventes nombres, materiales, estilos ni categorías
+
 Contexto del negocio:
 - Kanopy SOLO vende llaveros
 - Todos los productos publicados están disponibles
@@ -158,7 +170,7 @@ app.post("/chat", async (req, res) => {
     const completion = await openai.chat.completions.create({
       model: "gpt-4.1-mini",
       messages: sessions[sid],
-      temperature: 0.6,
+      temperature: 0.2,
     });
 
     const reply = completion.choices[0].message.content;
