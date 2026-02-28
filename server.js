@@ -1,132 +1,28 @@
-const express = require("express");
-const cors = require("cors");
-const dotenv = require("dotenv");
-const OpenAI = require("openai");
-
-dotenv.config();
-
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-app.use(cors());
-app.use(express.json());
-
-/* ================= OPENAI ================= */
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-
-/* ================= SHOPIFY ================= */
-const SHOPIFY_ENDPOINT = `https://${process.env.SHOPIFY_STORE_DOMAIN}/api/2024-01/graphql.json`;
-
-async function fetchShopify(query, variables = {}) {
-  try {
-    const response = await fetch(SHOPIFY_ENDPOINT, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Shopify-Storefront-Access-Token":
-          process.env.SHOPIFY_STOREFRONT_TOKEN,
-      },
-      body: JSON.stringify({ query, variables }),
-    });
-
-    const data = await response.json();
-
-    if (data.errors) {
-      console.error("❌ Shopify GraphQL errors:", data.errors);
-      return null;
-    }
-
-    return data.data;
-  } catch (err) {
-    console.error("❌ Shopify fetch failed:", err);
-    return null;
-  }
-}
-
-async function getProducts() {
-  const query = `
-    query {
-      products(first: 20) {
-        edges {
-          node {
-            title
-            handle
-            priceRange {
-              minVariantPrice {
-                amount
-                currencyCode
-              }
-            }
-          }
-        }
-      }
-    }
-  `;
-
-  const data = await fetchShopify(query);
-  if (!data || !data.products) return [];
-
-  return data.products.edges.map(e => ({
-    title: e.node.title,
-    price: `${e.node.priceRange.minVariantPrice.amount} ${e.node.priceRange.minVariantPrice.currencyCode}`,
-    url: `https://${process.env.SHOPIFY_STORE_DOMAIN}/products/${e.node.handle}`,
-  }));
-}
-
-/* ================= SESSION MEMORY ================= */
-const sessions = {};
-const MAX_HISTORY = 12;
-
-/* ================= SYSTEM PROMPT ================= */
-const SYSTEM_PROMPT = `
+/* ================= SYSTEM PROMPT BASE ================= */
+const SYSTEM_PROMPT_BASE = `
 Eres el asistente oficial de Kanopy.
 
 FORMATO DE RESPUESTA (OBLIGATORIO):
-- NO uses Markdown
+- NO uses Markdown (ni asteriscos, ni negritas)
 - NO uses [texto](link)
 - NO inventes etiquetas HTML
 - Los links deben ser URLs planas completas (https://...)
 
-REGLA CRÍTICA DE PRODUCTOS:
-- SOLO puedes mencionar productos que estén listados explícitamente en el catálogo que se te proporciona
-- Si un producto no está en el catálogo, responde: 
-  "Actualmente no tenemos ese llavero disponible en la tienda"
-- NO inventes nombres, materiales, estilos ni categorías
+REGLA CRÍTICA DE PRODUCTOS Y MATERIALES:
+- Todos nuestros productos son EXCLUSIVAMENTE impresos en 3D.
+- NO vendemos NADA de acrílico. Si el cliente pregunta por acrílico, aclara amablemente que solo trabajamos con impresión 3D.
+- SOLO puedes mencionar productos que estén listados explícitamente en el catálogo que se te proporciona en este mensaje.
+- Si un producto no está en el catálogo, responde: "Actualmente no tenemos ese llavero disponible en la tienda."
+- NO inventes nombres, materiales, estilos ni categorías.
 
 CONTACTO OFICIAL DE WHATSAPP (ÚNICO Y OBLIGATORIO):
 - WhatsApp: https://wa.me/18094400062
-- Texto del enlace: "Hablar con un agente por WhatsApp"
-
-CONTACTO OFICIAL DE WHATSAPP (ÚNICO Y OBLIGATORIO):
-- WhatsApp: https://wa.me/18094400062
-- Texto del enlace: "Hablar con un agente por WhatsApp"
-
-CUÁNDO OFRECER WHATSAPP:
-- SOLO cuando el cliente lo solicita explícitamente
-- O cuando habla de ayuda personalizada o pedidos especiales
-- No lo ofrezcas como link genérico
+- SOLO ofrécelo cuando el cliente lo solicita explícitamente, para pedidos personalizados, o para asistencia directa. No lo des como un link genérico de despedida.
 
 Contexto del negocio:
-- Kanopy SOLO vende llaveros
-- Todos los productos publicados están disponibles
-- No dependes de inventario
-- Nunca digas que no hay stock
-- Nunca inventes productos, enlaces ni precios
-
-Pedidos personalizados:
-- Se aceptan
-- Se derivan a WhatsApp
-- No se toman dentro del chat
-
-Reglas:
-- Usa SOLO productos reales de Shopify
-- Si no existe, dilo con claridad
-- Links siempre deben ser reales
-
-Idioma:
-- Español siempre
+- Kanopy SOLO vende llaveros.
+- Nunca digas que no hay stock (se fabrican bajo demanda).
+- Idioma: Siempre en Español.
 `;
 
 /* ================= CHAT ENDPOINT ================= */
@@ -139,68 +35,59 @@ app.post("/chat", async (req, res) => {
 
     const sid = sessionId || "default";
 
+    // 1. Inicializar historial si no existe (AQUÍ SOLO GUARDAMOS USER Y ASSISTANT)
     if (!sessions[sid]) {
-      sessions[sid] = [{ role: "system", content: SYSTEM_PROMPT }];
+      sessions[sid] = [];
     }
 
-    const wantsProducts =
-      /precio|comprar|producto|llavero|tienda|disponible|venta|link|enlace/i.test(
-        message
-      );
+    // 2. Agregar el mensaje actual del usuario al historial puro
+    sessions[sid].push({ role: "user", content: message });
+
+    // 3. Mantener el límite de memoria para no exceder tokens
+    if (sessions[sid].length > MAX_HISTORY) {
+      sessions[sid] = sessions[sid].slice(-MAX_HISTORY);
+    }
+
+    // 4. ¿El usuario busca productos? Construimos el contexto DINÁMICAMENTE
+    let catalogoContexto = "";
+    const wantsProducts = /precio|comprar|producto|llavero|tienda|disponible|venta|link|enlace/i.test(message);
 
     if (wantsProducts) {
-      const products = await getProducts();
+      // Tip: Si tienes más de 20 productos, asegúrate de cambiar "first: 20" a "first: 50" en tu función getProducts()
+      const products = await getProducts(); 
 
       if (products.length > 0) {
-        const productContext =
-          "Catálogo real de Kanopy (llaveros disponibles):\n" +
-          products
-            .map(p => `- ${p.title} | ${p.price} | ${p.url}`)
-            .join("\n");
-
-        sessions[sid].push({
-          role: "system",
-          content: productContext,
-        });
+        catalogoContexto = "\n\nCatálogo real y actual de Kanopy (llaveros disponibles):\n" +
+          products.map(p => `- ${p.title} | ${p.price} | ${p.url}`).join("\n");
       } else {
-        sessions[sid].push({
-          role: "system",
-          content:
-            "Si el cliente pregunta por productos, indica que el catálogo se está ampliando, sin inventar opciones.",
-        });
+        catalogoContexto = "\n\nNota interna: El catálogo se está ampliando, indica que por el momento no puedes mostrar los productos sin inventar opciones.";
       }
     }
 
-    sessions[sid].push({ role: "user", content: message });
+    // 5. Ensamblamos los mensajes para esta petición ESPECÍFICA.
+    // Combinamos el Prompt Base + El Catálogo (si aplica) + El historial limpio.
+    const mensajesParaOpenAI = [
+      { role: "system", content: SYSTEM_PROMPT_BASE + catalogoContexto },
+      ...sessions[sid]
+    ];
 
-    if (sessions[sid].length > MAX_HISTORY) {
-      sessions[sid] = [
-        sessions[sid][0],
-        ...sessions[sid].slice(-MAX_HISTORY),
-      ];
-    }
-
+    // 6. Llamada a la API
     const completion = await openai.chat.completions.create({
-      model: "gpt-4.1-mini",
-      messages: sessions[sid],
-      temperature: 0.2,
+      model: "gpt-4o-mini", // Modelo corregido
+      messages: mensajesParaOpenAI,
+      temperature: 0.2, // Baja temperatura = respuestas lógicas y apegadas al catálogo
     });
 
     const reply = completion.choices[0].message.content;
 
+    // 7. Guardar la respuesta del bot en el historial puro
     sessions[sid].push({ role: "assistant", content: reply });
 
     res.json({ reply });
   } catch (error) {
     console.error("❌ Chat error:", error);
     res.status(500).json({
-      reply:
-        "Ahora mismo no pude responder correctamente. Un agente humano puede ayudarte.",
+      reply: "Ahora mismo no pude responder correctamente. Un agente humano puede ayudarte escribiendo al WhatsApp: https://wa.me/18094400062",
     });
   }
-});
-
-/* ================= START ================= */
-app.listen(PORT, () => {
-  console.log(`✅ Kanopy Chat Backend activo en puerto ${PORT}`);
 });
