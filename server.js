@@ -151,7 +151,10 @@ app.post("/chat", async (req, res) => {
       temperature: 0.2, // Baja temperatura para evitar alucinaciones
     });
 
-    const reply = completion.choices[0].message.content;
+    let reply = completion.choices[0].message.content;
+
+    // Filtro de seguridad: Elimina puntos o comas pegados al final de los enlaces de Shopify o WhatsApp
+    reply = reply.replace(/(https?:\/\/[^\s]+)[\.,;]/g, '$1');
 
     // Guardar la interacción en el historial puro
     sessions[sid].push({ role: "user", content: message });
