@@ -154,7 +154,7 @@ app.post("/chat", async (req, res) => {
     let reply = completion.choices[0].message.content;
 
     // Filtro de seguridad: Elimina puntos o comas pegados al final de los enlaces de Shopify o WhatsApp
-    reply = reply.replace(/(https?:\/\/[^\s]+)[\.,;]/g, '$1');
+    reply = reply.replace(/(https?:\/\/[^\s]+?)[\.,;]+(?=\s|$)/g, '$1');
 
     // Guardar la interacción en el historial puro
     sessions[sid].push({ role: "user", content: message });
